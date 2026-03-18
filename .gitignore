@@ -1,0 +1,15 @@
+# Environment variables (contains secrets)
+.env
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Output data (can be large)
+output/
+
+# Python cache
+__pycache__
+*.py[cod]
+
+# Local settings
+.DS_Store
