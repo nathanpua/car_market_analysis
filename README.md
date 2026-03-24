@@ -2,141 +2,107 @@
 
 ## Overview
 
-This project scrapes all ~13,800+ used car listings from [sgcarmart.com/used-cars](https://www.sgcarmart.com/used-cars/) using Cloudflare's asynchronous `/crawl` API to extract a complete 40+ field dataset per car and store everything in Polars DataFrames exported to Parquet format.
-
-## Table of Contents
-- [Overview](#overview)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Getting Started](#getting-started)
-- [Usage](#usage)
-- [Project Structure](#project-structure)
-- [Business Requirements](#business-requirements)
-- [User Stories](#user-stories)
-- [Cost Estimation](#cost-estimation)
-- [Contributing](#contributing)
-- [License](#license)
-
-## Features
-
-- **Efficient Data Collection**: Uses Cloudflare's `/crawl` API (~80-230 API calls vs ~14,500 with individual scrapes)
-- **Automatic Link Discovery**: Crawler follows links from listing pages to detail pages automatically
-- **Server-Side Processing**: No client-side rate limits or checkpoint management needed
-- **Robust Parsing**: Extracts structured data from Next.js RSC flight payloads with BeautifulSoup fallback
-- **Data Quality**: Comprehensive validation, cleaning, and type casting of 49 data fields
-- **Resume Capable**: Results persist server-side for 14 days, allowing notebook restarts
-- **Multiple Output Formats**: Parquet (primary) and CSV (secondary) exports
-- **Comprehensive Analytics**: Built-in summary statistics and cost reporting
+This project scrapes ~14,000 used car listings from sgcarmart.com using Cloudflare's Browser Rendering API. It extracts 25+ fields per car listing and exports to Parquet/CSV format.
 
 ## Architecture
 
-The scraper follows a 6-phase implementation approach:
+The scraper uses a two-phase approach with Cloudflare Workers Bindings for browser rendering.
 
-1. **Environment Setup**: Dependency installation and credential validation
-2. **Cloudflare API Client**: Functions to submit, poll, and cancel crawl jobs
-3. **Test Crawl Validation**: Small-scale test to verify approach before full execution
-4. **Full Production Crawl**: Execute the complete crawl job for all listings
-5. **Data Parsing & Extraction**: Parse HTML to extract structured car data
-6. **Data Cleaning & Validation**: Type casting, data integrity checks, and edge case handling
-7. **Export & Summary**: Save datasets and generate summary statistics
+**Phase 1: URL Discovery**
+- Crawls ~140 listing pages to extract detail page URLs
+- Uses `/content` endpoint (respects pagination query parameters)
+- Stores URLs in SQLite for incremental re-runs
+- Early termination after 3 consecutive pages with no new URLs
+- First run: ~13 minutes | Incremental: ~2 minutes
 
-## Getting Started
+**Phase 2: Detail Crawling**
+- Crawls ~14,000 detail pages using Workers Bindings
+- 10 concurrent browsers with Puppeteer
+- ~36 URLs/min throughput
+- Wall-clock time: ~6.6 hours
+- Incremental (skips already crawled URLs)
 
-### Prerequisites
-- Python 3.8+
-- Cloudflare Workers Paid Plan ($5/month) - Free tier is insufficient
-- Cloudflare API credentials with Account > Browser Rendering > Edit permission
+## Key Technical Decisions
 
-### Installation
-1. Clone this repository
-2. Install dependencies:
-   ```bash
-   pip install httpx polars beautifulsoup4 python-dotenv tqdm
-   ```
-3. Create a `.env` file with your Cloudflare credentials:
-   ```env
-   CF_ACCOUNT_ID=your-account-id
-   CF_API_TOKEN=your-api-token
-   ```
+### 1. Workers Bindings over /crawl REST API
 
-## Usage
+The `/crawl` REST API is a black-box solution with limited concurrency control. Workers Bindings provides full Puppeteer control, enabling custom wait conditions, error handling, and 2x throughput improvement.
 
-The main implementation is in `cloudflare_scraper.ipynb`. Execute the notebook cells in order:
+| Aspect | /crawl API | Workers Bindings |
+|--------|------------|------------------|
+| Throughput | ~20 URLs/min | ~36 URLs/min |
+| Control | Black box | Full Puppeteer |
+| Customization | None | Scripts, wait conditions |
 
-1. **Cells 1-2**: Environment setup and credential validation
-2. **Cells 3-4**: Cloudflare API client functions
-3. **Cells 5-7**: Test crawl validation (GO/NO-GO decision point)
-4. **Cells 8-9**: Fallback approach (only if test crawl fails)
-5. **Cells 10-12**: Full production crawl execution
-6. **Cells 13-17**: Data parsing and extraction
-7. **Cells 18-21**: Data cleaning and validation
-8. **Cells 22-24**: Export datasets and generate summary statistics
+### 2. /content Endpoint for Phase 1
+
+The `/crawl` endpoint normalizes URLs and strips query parameters, breaking pagination. The `/content` endpoint preserves `?page=N` parameters, making it the correct choice for listing page discovery.
+
+### 3. 10 Concurrent Browsers
+
+Testing showed that 15, 20, 25, and 30 concurrent browsers all hit Cloudflare rate limits. 10 browsers is the stable maximum on the Workers Paid Plan.
+
+### 4. SQLite over Cloudflare KV
+
+SQLite provides 1ms lookups vs 50-100ms network calls to Cloudflare KV. Since notebooks run locally, there is no need for cloud storage. This enables fast incremental re-runs without network latency.
+
+### 5. Browser Cleanup in Finally Block
+
+Unclosed browsers block concurrency slots for up to 60 seconds, causing rate limiting. The worker always closes browsers in a finally block to ensure slots are freed immediately.
+
+### 6. Incremental Crawling
+
+**Phase 1:** SQLite tracks seen URLs, enabling re-runs in ~2 minutes instead of ~13 minutes. Early termination stops after 3 consecutive pages with no new URLs.
+
+**Phase 2:** Skips URLs already in results file. Failed URLs are tracked for retry. Checkpoints saved every 20 batches for resume capability.
+
+## Data Fields
+
+| Category | Fields |
+|----------|--------|
+| Identity | listing_id, car_model, detail_page_url |
+| Financial | price, depreciation, omv, arf, coe, road_tax, dereg_value |
+| Technical | engine_cap, fuel_type, power, transmission, curb_weight |
+| History | reg_date, manufactured, mileage, owners |
+| Metadata | status, vehicle_type, features, accessories |
 
 ## Project Structure
-```
-sgcarmart/
-├── .env                      # Cloudflare credentials (NOT committed)
-├── cloudflare_scraper.ipynb  # Main implementation notebook
-├── scraper.ipynb             # Old TinyFish scraper (reference only)
-├── SCRAPING_PLAN.md          # Technical implementation plan
-├── BUSINESS_REQUIREMENTS.md  # Business requirements and user stories
-├── README.md                 # This file
-└── output/
-    ├── sgcarmart_used_cars_full.parquet   # Primary dataset
-    ├── sgcarmart_used_cars_full.csv       # Secondary dataset
-    └── raw_crawl_results.parquet          # Optional: raw HTML for re-parsing
-```
 
-## Business Requirements
+| File/Directory | Purpose |
+|----------------|---------|
+| `01_environment_setup.ipynb` | Validate credentials |
+| `02_test_crawl.ipynb` | Test and discover RSC pattern |
+| `03_validate_crawl_approach.ipynb` | Validate on sample URLs |
+| `04_production_crawl.ipynb` | Phase 1: URL Discovery |
+| `05_workers_binding_crawl.ipynb` | Phase 2: Detail crawling |
+| `worker/` | Cloudflare Worker configuration |
+| `output/seen_urls.db` | SQLite: seen URLs for incremental |
+| `output/full_detail_data.parquet` | Final dataset |
 
-See [BUSINESS_REQUIREMENTS.md](BUSINESS_REQUIREMENTS.md) for detailed business objectives, functional requirements, non-functional requirements, and success metrics.
+## Cost Analysis
 
-## User Stories
+| Metric | Value |
+|--------|-------|
+| Workers Paid Plan | $5.00/month |
+| Included duration | 10 hours/month |
+| Estimated usage | 10-12 hours (full crawl + incrementals) |
+| Overage rate | $0.09/hour |
+| Typical monthly cost | ~$5.50-6.50 |
+| Cost per 1,000 URLs | ~$0.06 |
 
-See [BUSINESS_REQUIREMENTS.md](BUSINESS_REQUIREMENTS.md#user-stories) for complete user stories covering:
-- Data Engineer environment setup and testing
-- Full crawl execution and monitoring
-- Data parsing, cleaning, and validation
-- Data analysis access and cost reporting
-- System reliability and maintenance
+See `COST_ANALYSIS.md` for detailed breakdown.
 
-## Cost Estimation
+## Efficiency Comparison
 
-Based on the scraping plan, estimated monthly costs:
+| Approach | API Calls | Browser Time | Throughput |
+|----------|-----------|--------------|------------|
+| Individual scrapes | ~14,000 | ~40 hours | ~6 URLs/min |
+| /crawl REST API | ~100 | ~12 hours | ~20 URLs/min |
+| Workers Bindings | ~100 | ~6 hours | ~36 URLs/min |
 
-| Scenario | Avg seconds/page | Total browser hours | Included free | Overage @ $0.09/hr | **Total monthly** |
-|----------|-----------------|--------------------|--------------|--------------------|------------------|
-| Best case | 3s | 12 hrs | 10 hrs | $0.18 | **$5.18** |
-| Likely case | 5s | 20 hrs | 10 hrs | $0.90 | **$5.90** |
-| Conservative | 8s | 32 hrs | 10 hrs | $1.98 | **$6.98** |
-| Worst case | 15s | 60 hrs | 10 hrs | $4.50 | **$9.50** |
+## Prerequisites
 
-**Required Plan**: Workers Paid ($5/mo). Free tier is unusable (100 page cap, 5 jobs/day, 10 min/day browser time, 6 req/min).
-
-## API Call Comparison
-
-| Approach | API Calls |
-|----------|-----------|
-| Legacy `/scrape` | ~14,500 individual requests |
-| Cloudflare `/crawl` | ~80-230 total calls |
-| **Reduction** | **>98% fewer API calls** |
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-Please ensure your changes align with the project goals and follow the established patterns.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- Cloudflare Browser Rendering API for enabling efficient large-scale scraping
-- sgcarmart.com for providing the used car marketplace data
-- The open-source community for tools like Polars, HTTPX, and BeautifulSoup
+- Python 3.8+
+- Cloudflare Workers Paid Plan ($5/month) - required for 10 browser concurrency
+- API token with Browser Rendering permission
+- Node.js 18+ (for worker deployment)
