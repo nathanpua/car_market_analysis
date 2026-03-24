@@ -13,3 +13,4 @@ __pycache__
 
 # Local settings
 .DS_Store
+/.claudenode_modules/
