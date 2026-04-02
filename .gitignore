@@ -13,6 +13,6 @@ __pycache__
 
 # Local settings
 .DS_Store
-/.claudenode_modules/
+/.claude
 worker/node_modules/
 worker/.wrangler/
