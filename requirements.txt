@@ -1,17 +1,11 @@
 # SGCarMart Web Scraper Dependencies
-# Python 3.8+ required
+# Python 3.11+ required
 
-# HTTP client for Cloudflare Browser Rendering API
-httpx>=0.24.0
+# Scraping (static HTTP with curl_cffi backend)
+scrapling[all]>=0.1.0
 
 # DataFrame manipulation and Parquet export
 polars>=1.0.0
-
-# HTML parsing fallback
-beautifulsoup4>=4.12.0
-
-# Environment variable management
-python-dotenv>=1.0.0
 
 # Progress bars for monitoring
 tqdm>=4.65.0

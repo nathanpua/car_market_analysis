@@ -1,9 +1,0 @@
-{
-  "name": "sgcarmart-browser-worker",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "@cloudflare/puppeteer": "^0.0.13"
-  }
-}
