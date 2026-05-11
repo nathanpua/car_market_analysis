@@ -3,7 +3,16 @@ name: Daily Scrape
 on:
   schedule:
     - cron: '0 19 * * *'   # 03:00 SGT = 19:00 UTC
-  workflow_dispatch:         # manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: "Max listing pages for Phase 1 (default: all)"
+        required: false
+        default: ""
+      detail_limit:
+        description: "Max detail pages for Phase 2 (default: all)"
+        required: false
+        default: ""
 
 concurrency:
   group: daily-scrape
@@ -25,7 +34,11 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run daily scrape
-        run: python ci_run.py
+        run: |
+          ARGS=""
+          [ -n "${{ github.event.inputs.max_pages }}" ] && ARGS="$ARGS --max-pages ${{ github.event.inputs.max_pages }}"
+          [ -n "${{ github.event.inputs.detail_limit }}" ] && ARGS="$ARGS --detail-limit ${{ github.event.inputs.detail_limit }}"
+          python ci_run.py $ARGS
         env:
           PYTHONUNBUFFERED: "1"
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
