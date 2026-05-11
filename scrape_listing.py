@@ -10,14 +10,19 @@ Phase 2 fetches each detail page's static HTML and parses ALL remaining
 columns (price, depreciation, mileage, features, etc.) from Next.js RSC payloads.
 
 Setup:
-  pip install scrapling[all] polars tqdm
+  pip install -r requirements.txt
 
 Usage:
   python scrape_listing.py scrape              # Phase 1: discover all URLs
   python scrape_listing.py scrape --pages 3    # Discover first 3 pages only
   python scrape_listing.py scrape-details      # Phase 2: scrape all detail pages
   python scrape_listing.py scrape-details --limit 100  # Test with 100 pages
+  python scrape_listing.py scrape-details --validate   # Enable field validation (default)
+  python scrape_listing.py scrape-details --no-validate # Disable field validation
   python scrape_listing.py stats               # Show field coverage stats
+  python scrape_listing.py run-daily           # One-shot: Phase 1 + Phase 2
+  python scrape_listing.py schedule            # Daemon: daily cron (Asia/Singapore)
+  python scrape_listing.py history LISTING_ID  # Show listing history
 """
 
 import argparse
@@ -29,7 +34,9 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from db import ListingDB
+from db import ListingDB, QuarantineDB
+from db_scd import ListingHistoryDB
+from validators import ListingValidator
 
 logger = logging.getLogger(__name__)
 
@@ -255,10 +262,9 @@ def parse_detail_html(html: str) -> dict:
             raw[field] = val
 
     # type_of_vehicle: nested object {\"text\":\"SUV\",...}
-    m_tov = re.search(r'\\"type_of_vehicle\\":\{\\"text\\":\\"((?:[^"\\]|\\.)*)', data_line)
-    if m_tov:
-        val = m_tov.group(1)
-        raw['type_of_vehicle'] = val.replace('\\"', '"').replace('\\\\', '\\').replace('\\n', '\n')
+    tov = _extract_rsc_field(data_line, 'type_of_vehicle')
+    if tov:
+        raw['type_of_vehicle'] = tov
 
     # car_model from title tag (fallback)
     m = re.search(r'<title>Used \d+ (.*?) for Sale', html)
@@ -532,12 +538,31 @@ async def _fetch_detail_batch(
     return await asyncio.gather(*[fetch_one(lid, url) for lid, url in batch])
 
 
-async def _run_scrape_details(limit: int | None = None):
+async def _run_scrape_details(limit: int | None = None, validate: bool = True,
+                              track_history: bool = False):
     """Async implementation of Phase 2 detail page scraping."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     with ListingDB(DB_PATH) as db:
-        pending = db.get_listings_missing_details(limit=limit)
+        quarantine_db = QuarantineDB(db) if validate else None
+        validator = ListingValidator() if validate else None
+        scd = ListingHistoryDB(db) if track_history else None
+
+        # When SCD is enabled, re-fetch both missing and active listings
+        # to detect price/depreciation changes
+        if scd:
+            missing = db.get_listings_missing_details(limit=None)
+            active = db.get_active_listings_for_rescrape()
+            seen_ids: set[int] = set()
+            pending: list[tuple[int, str]] = []
+            for lid, url in missing + active:
+                if lid not in seen_ids:
+                    seen_ids.add(lid)
+                    pending.append((lid, url))
+            if limit:
+                pending = pending[:limit]
+        else:
+            pending = db.get_listings_missing_details(limit=limit)
         total_pending = len(pending)
         if total_pending == 0:
             print("All listings already have detail data.")
@@ -553,11 +578,16 @@ async def _run_scrape_details(limit: int | None = None):
 
         print(f"Phase 2: Scraping detail pages for {total_pending} listings")
         print(f"Concurrency: {DETAIL_BATCH_SIZE} | Delay: {REQUEST_DELAY}s | Retries: {MAX_RETRIES}")
+        if validate:
+            print(f"Validation: ON (invalid fields quarantined)")
+        if track_history:
+            print(f"History: SCD Type 2 tracking enabled")
         print(f"Output: {DB_PATH}\n")
 
         start_time = datetime.now()
         fetched = 0
         failed = 0
+        quarantine_count = 0
 
         try:
             with tqdm(total=total_pending, unit="page") as pbar:
@@ -565,20 +595,35 @@ async def _run_scrape_details(limit: int | None = None):
                     batch = tasks[i:i + DETAIL_BATCH_SIZE]
                     results = await _fetch_detail_batch(batch)
 
-                    # Upsert successful results
+                    # Process successful results
                     batch_ok = []
                     for listing_id, detail in results:
                         if detail is not None:
-                            batch_ok.append(detail)
+                            if validator and quarantine_db:
+                                result = validator.validate(detail)
+                                quarantine_count += len(result.failures)
+                                if result.failures:
+                                    dicts = ListingValidator.failures_to_dicts(result.failures)
+                                    quarantine_db.insert_failures(dicts)
+                                batch_ok.append(result.cleaned)
+                            else:
+                                batch_ok.append(detail)
                             fetched += 1
                         else:
                             failed += 1
 
                     if batch_ok:
-                        db.upsert_listings(batch_ok)
+                        if scd:
+                            counts = scd.upsert_with_history(batch_ok)
+                            pbar.set_postfix(
+                                ok=fetched, err=failed, q=quarantine_count,
+                                new=counts["new"], chg=counts["changed"],
+                            )
+                        else:
+                            db.upsert_listings(batch_ok)
+                            pbar.set_postfix(ok=fetched, err=failed, q=quarantine_count)
 
                     pbar.update(len(batch))
-                    pbar.set_postfix(ok=fetched, err=failed)
 
                     if fetched > 0 and fetched % DETAIL_CHECKPOINT_EVERY == 0:
                         remaining = db.count_missing_details()
@@ -599,6 +644,8 @@ async def _run_scrape_details(limit: int | None = None):
             print(f"  Fetched:    {fetched}")
             print(f"  Failed:     {failed}")
             print(f"  Remaining:  {remaining}")
+            if validate:
+                print(f"  Quarantined fields: {quarantine_count}")
             print(f"  Elapsed:    {elapsed:.0f}s ({elapsed / 60:.1f} min)")
             if fetched > 0:
                 speed = fetched / max(elapsed / 60, 0.01)
@@ -607,9 +654,12 @@ async def _run_scrape_details(limit: int | None = None):
             print_stats_from_db(db)
 
 
-def scrape_details(limit: int | None = None):
+def scrape_details(limit: int | None = None, validate: bool = True,
+                   track_history: bool = False):
     """Phase 2: Scrape detail pages for ALL data."""
-    asyncio.run(_run_scrape_details(limit=limit))
+    asyncio.run(_run_scrape_details(
+        limit=limit, validate=validate, track_history=track_history,
+    ))
 
 
 def print_stats_from_db(db: ListingDB):
@@ -649,6 +699,39 @@ def main():
     dp = sub.add_parser("scrape-details", help="Phase 2: scrape detail pages for all data")
     dp.add_argument("--limit", type=int, default=None,
                     help="Max detail pages to fetch (default: all)")
+    dp.add_argument("--validate", action="store_true", default=True,
+                    help="Enable field validation (default: on)")
+    dp.add_argument("--no-validate", action="store_false", dest="validate",
+                    help="Disable field validation")
+    dp.add_argument("--track-history", action="store_true", default=False,
+                    help="Enable SCD Type 2 history tracking")
+
+    hp = sub.add_parser("history", help="Show listing change history")
+    hp.add_argument("listing_id", type=int, help="Listing ID to query")
+    hp.add_argument("--limit", type=int, default=20,
+                    help="Max history rows to show (default: 20)")
+
+    rdp = sub.add_parser("run-daily", help="One-shot: Phase 1 + Phase 2")
+    rdp.add_argument("--max-pages", type=int, default=None,
+                     help="Max listing pages for Phase 1 (default: all)")
+    rdp.add_argument("--detail-limit", type=int, default=None,
+                     help="Max detail pages for Phase 2 (default: all)")
+    rdp.add_argument("--no-validate", action="store_true", default=False,
+                     help="Disable field validation")
+    rdp.add_argument("--track-history", action="store_true", default=False,
+                     help="Enable SCD Type 2 history tracking")
+
+    sch = sub.add_parser("schedule", help="Daemon: daily cron (Asia/Singapore)")
+    sch.add_argument("--time", type=str, default="03:00",
+                     help="Daily run time HH:MM (default: 03:00)")
+    sch.add_argument("--max-pages", type=int, default=None,
+                     help="Max listing pages for Phase 1 (default: all)")
+    sch.add_argument("--detail-limit", type=int, default=None,
+                     help="Max detail pages for Phase 2 (default: all)")
+    sch.add_argument("--no-validate", action="store_true", default=False,
+                     help="Disable field validation")
+    sch.add_argument("--track-history", action="store_true", default=False,
+                     help="Enable SCD Type 2 history tracking")
 
     args = parser.parse_args()
 
@@ -663,7 +746,11 @@ def main():
         scrape(max_pages=args.pages, start_page=start)
 
     elif args.command == "scrape-details":
-        scrape_details(limit=args.limit)
+        scrape_details(
+            limit=args.limit,
+            validate=args.validate,
+            track_history=args.track_history,
+        )
 
     elif args.command == "stats":
         with ListingDB(DB_PATH) as db:
@@ -673,6 +760,44 @@ def main():
                 print_stats_from_db(db)
             else:
                 print("No data found. Run `python scrape_listing.py scrape` first.")
+
+    elif args.command == "history":
+        with ListingDB(DB_PATH) as db:
+            scd = ListingHistoryDB(db)
+            history = scd.get_history(args.listing_id)
+            if not history:
+                print(f"No history found for listing {args.listing_id}")
+                return
+            print(f"\nHistory for listing {args.listing_id} ({len(history)} versions)")
+            print("-" * 60)
+            for row in history[:args.limit]:
+                current_marker = " [CURRENT]" if row["is_current"] else ""
+                print(
+                    f"  {row['valid_from']} -> {row['valid_to'] or 'now'}"
+                    f"{current_marker}"
+                )
+                print(f"    Price: {row.get('price')} | Status: {row.get('status')}")
+                print(f"    Mileage: {row.get('mileage_km')} | COE: {row.get('coe_remaining')}")
+
+    elif args.command == "run-daily":
+        from scheduler import run_daily_scrape
+        run_daily_scrape(
+            max_pages=args.max_pages,
+            detail_limit=args.detail_limit,
+            validate=not args.no_validate,
+            track_history=args.track_history,
+        )
+
+    elif args.command == "schedule":
+        from scheduler import start_scheduler
+        start_scheduler(
+            time=args.time,
+            max_pages=args.max_pages,
+            detail_limit=args.detail_limit,
+            validate=not args.no_validate,
+            track_history=args.track_history,
+        )
+
     else:
         parser.print_help()
 

@@ -9,3 +9,9 @@ polars>=1.0.0
 
 # Progress bars for monitoring
 tqdm>=4.65.0
+
+# Scheduler for daily automated scraping
+apscheduler>=3.10.0
+
+# Cloud storage (R2/S3) for CI persistence
+boto3>=1.34.0

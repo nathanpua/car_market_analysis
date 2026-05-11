@@ -247,5 +247,117 @@ class ListingDB:
             sql += f" LIMIT {int(limit)}"
         return self.conn.execute(sql).fetchall()
 
+    def get_active_listings_for_rescrape(self) -> list[tuple[int, str]]:
+        """Return (listing_id, detail_url) for fully-scraped active listings.
+
+        Used by SCD to re-fetch listings for price/depreciation change detection.
+        Excludes SOLD/CLOSED listings.
+        """
+        return self.conn.execute(
+            "SELECT listing_id, detail_url FROM listings "
+            "WHERE detail_url IS NOT NULL "
+            "AND price IS NOT NULL AND accessories IS NOT NULL "
+            "AND (status IS NULL OR status NOT IN ('SOLD', 'Sold', 'CLOSED', 'Closed')) "
+            "ORDER BY listing_id"
+        ).fetchall()
+
     def close(self):
         self.conn.close()
+
+
+# ============================================================
+# Quarantine table for validation failures
+# ============================================================
+
+SCHEMA_QUARANTINE = """
+CREATE TABLE IF NOT EXISTS quarantine (
+    quarantine_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id     INTEGER,
+    field_name     TEXT NOT NULL,
+    field_value    TEXT,
+    rule_name      TEXT NOT NULL,
+    reason         TEXT NOT NULL,
+    raw_record     TEXT,
+    quarantined_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+    scrape_run_id  INTEGER,
+    resolved       INTEGER DEFAULT 0
+);
+"""
+
+_INSERT_QUARANTINE_SQL = (
+    "INSERT INTO quarantine "
+    "(listing_id, field_name, field_value, rule_name, reason, raw_record, scrape_run_id) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+class QuarantineDB:
+    """Manages the quarantine table for invalid field values."""
+
+    def __init__(self, db: ListingDB):
+        self.db = db
+        self.conn = db.conn
+        self._init_quarantine_schema()
+
+    def _init_quarantine_schema(self):
+        self.conn.executescript(SCHEMA_QUARANTINE)
+        self.conn.commit()
+
+    def insert_failures(
+        self, failures: list[dict], run_id: int | None = None,
+    ):
+        """Insert validation failure records into quarantine.
+
+        Args:
+            failures: list of dicts with keys: listing_id, field_name,
+                      field_value, rule_name, reason, raw_record
+            run_id: optional scrape run ID
+        """
+        if not failures:
+            return
+        rows = [
+            (
+                f.get("listing_id"),
+                f["field_name"],
+                f.get("field_value"),
+                f["rule_name"],
+                f["reason"],
+                f.get("raw_record"),
+                run_id,
+            )
+            for f in failures
+        ]
+        self.conn.executemany(_INSERT_QUARANTINE_SQL, rows)
+        self.conn.commit()
+
+    def get_stats(self) -> dict:
+        """Return quarantine statistics: total, by rule, unresolved count."""
+        cursor = self.conn.execute("SELECT COUNT(*) FROM quarantine")
+        total = cursor.fetchone()[0]
+
+        cursor = self.conn.execute(
+            "SELECT COUNT(*) FROM quarantine WHERE resolved = 0"
+        )
+        unresolved = cursor.fetchone()[0]
+
+        cursor = self.conn.execute(
+            "SELECT rule_name, COUNT(*) as cnt FROM quarantine "
+            "GROUP BY rule_name ORDER BY cnt DESC"
+        )
+        by_rule = {row[0]: row[1] for row in cursor.fetchall()}
+
+        return {"total": total, "unresolved": unresolved, "by_rule": by_rule}
+
+    def get_recent(self, limit: int = 50) -> list[dict]:
+        """Get most recent quarantine records."""
+        cursor = self.conn.execute(
+            "SELECT quarantine_id, listing_id, field_name, field_value, "
+            "rule_name, reason, quarantined_at, resolved "
+            "FROM quarantine ORDER BY quarantined_at DESC LIMIT ?",
+            (limit,),
+        )
+        keys = [
+            "quarantine_id", "listing_id", "field_name", "field_value",
+            "rule_name", "reason", "quarantined_at", "resolved",
+        ]
+        return [dict(zip(keys, row)) for row in cursor.fetchall()]
