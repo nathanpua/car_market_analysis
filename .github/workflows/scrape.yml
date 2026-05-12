@@ -20,25 +20,21 @@ concurrency:
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip3 install -r requirements.txt
 
       - name: Run daily scrape
         run: |
           ARGS=""
           [ -n "${{ github.event.inputs.max_pages }}" ] && ARGS="$ARGS --max-pages ${{ github.event.inputs.max_pages }}"
           [ -n "${{ github.event.inputs.detail_limit }}" ] && ARGS="$ARGS --detail-limit ${{ github.event.inputs.detail_limit }}"
-          python ci_run.py $ARGS
+          python3 ci_run.py $ARGS
         env:
           PYTHONUNBUFFERED: "1"
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
