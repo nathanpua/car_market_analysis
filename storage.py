@@ -101,6 +101,14 @@ def upload_db() -> None:
     raise RuntimeError(f"Upload failed after {_UPLOAD_RETRIES} attempts")
 
 
+def delete_db() -> None:
+    """Delete the DB from R2."""
+    client = _get_s3_client()
+    bucket = _get_bucket()
+    client.delete_object(Bucket=bucket, Key=R2_DB_KEY)
+    logger.info("Deleted DB from R2: %s/%s", bucket, R2_DB_KEY)
+
+
 def get_db_info() -> dict:
     """Return metadata about the DB in R2: file size, last modified."""
     client = _get_s3_client()

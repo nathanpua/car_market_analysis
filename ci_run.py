@@ -23,6 +23,8 @@ def main():
                         help="Max listing pages for Phase 1")
     parser.add_argument("--detail-limit", type=int, default=None,
                         help="Max detail pages for Phase 2")
+    parser.add_argument("--reset-db", action="store_true",
+                        help="Delete existing DB from R2 before running")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -37,6 +39,15 @@ def main():
     print(f"  Dry run:     {args.dry_run}")
     print(f"  Max pages:   {args.max_pages or 'all'}")
     print(f"  Detail limit: {args.detail_limit or 'all'}\n")
+
+    # Reset DB if requested
+    if args.reset_db and not args.dry_run:
+        print("=" * 40)
+        print("  STORAGE: Deleting DB from R2")
+        print("=" * 40)
+        from storage import delete_db
+        delete_db()
+        print("  DB deleted from R2\n")
 
     # Proxy connectivity test
     proxy_url = os.environ.get("SCRAPER_PROXY", "").strip()
