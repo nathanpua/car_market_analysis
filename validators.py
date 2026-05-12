@@ -129,7 +129,7 @@ VALIDATION_RULES: dict[str, list[tuple[str, object]]] = {
         ("omv_range", lambda v, _n: _range_check(v, 0, 1_000_000, "omv")),
     ],
     "arf": [
-        ("arf_range", lambda v, _n: _range_check(v, 0, 1_000_000, "arf")),
+        ("arf_range", lambda v, _n: _range_check(v, 0, 5_000_000, "arf")),
     ],
     "power": [
         ("power_range", lambda v, _n: _range_check(v, 0, 2000, "power")),
