@@ -13,6 +13,14 @@ on:
         description: "Max detail pages for Phase 2 (default: all)"
         required: false
         default: ""
+      reset_db:
+        description: "Delete existing DB from R2 before running (true/false)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - "true"
 
 concurrency:
   group: daily-scrape
@@ -38,6 +46,7 @@ jobs:
           ARGS=""
           [ -n "${{ github.event.inputs.max_pages }}" ] && ARGS="$ARGS --max-pages ${{ github.event.inputs.max_pages }}"
           [ -n "${{ github.event.inputs.detail_limit }}" ] && ARGS="$ARGS --detail-limit ${{ github.event.inputs.detail_limit }}"
+          [ "${{ github.event.inputs.reset_db }}" = "true" ] && ARGS="$ARGS --reset-db"
           python ci_run.py $ARGS
         env:
           PYTHONUNBUFFERED: "1"
