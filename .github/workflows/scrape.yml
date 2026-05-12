@@ -14,32 +14,37 @@ on:
         required: false
         default: ""
       reset_db:
-        description: "Delete existing DB from R2 before running (true/false)"
+        description: "Delete existing DB from R2 before running"
         required: false
         default: ""
         type: choice
         options:
           - ""
           - "true"
+      runner:
+        description: "Runner to use"
+        required: false
+        default: "self-hosted"
+        type: choice
+        options:
+          - "self-hosted"
+          - "ubuntu-latest"
 
 concurrency:
   group: daily-scrape
-  cancel-in-progress: false  # don't kill a running scrape
+  cancel-in-progress: false
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner || 'self-hosted' }}
     timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python3 -m pip install --quiet -r requirements.txt
 
       - name: Run daily scrape
         run: |
@@ -47,7 +52,7 @@ jobs:
           [ -n "${{ github.event.inputs.max_pages }}" ] && ARGS="$ARGS --max-pages ${{ github.event.inputs.max_pages }}"
           [ -n "${{ github.event.inputs.detail_limit }}" ] && ARGS="$ARGS --detail-limit ${{ github.event.inputs.detail_limit }}"
           [ "${{ github.event.inputs.reset_db }}" = "true" ] && ARGS="$ARGS --reset-db"
-          python ci_run.py $ARGS
+          python3 ci_run.py $ARGS
         env:
           PYTHONUNBUFFERED: "1"
           SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
