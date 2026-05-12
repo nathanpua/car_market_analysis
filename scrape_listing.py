@@ -28,6 +28,7 @@ Usage:
 import argparse
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,9 @@ MAX_RETRIES = 3      # retries per failed request
 
 OUTPUT_DIR = Path("output")
 DB_PATH = OUTPUT_DIR / "scrapling_listings.db"
+
+# Proxy support (optional, set SCRAPER_PROXY env var)
+PROXY_URL = os.environ.get("SCRAPER_PROXY") or None
 
 
 # ============================================================
@@ -372,7 +376,7 @@ async def _fetch_with_retry(url: str) -> tuple[bool, str]:
             await asyncio.sleep(REQUEST_DELAY - elapsed)
 
         try:
-            page = await AsyncFetcher.get(url)
+            page = await AsyncFetcher.get(url, proxy=PROXY_URL)
             _last_request_time = asyncio.get_event_loop().time()
 
             if page.status == 200:
