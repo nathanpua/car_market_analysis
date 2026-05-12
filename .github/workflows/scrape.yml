@@ -46,8 +46,8 @@ jobs:
       - name: Run daily scrape
         run: |
           ARGS=""
-          [ -n "${{ github.event.inputs.max_pages }}" ] && ARGS="$ARGS --max-pages '${{ github.event.inputs.max_pages }}'"
-          [ -n "${{ github.event.inputs.detail_limit }}" ] && ARGS="$ARGS --detail-limit '${{ github.event.inputs.detail_limit }}'"
+          [ -n "${{ github.event.inputs.max_pages }}" ] && ARGS="$ARGS --max-pages ${{ github.event.inputs.max_pages }}"
+          [ -n "${{ github.event.inputs.detail_limit }}" ] && ARGS="$ARGS --detail-limit ${{ github.event.inputs.detail_limit }}"
           [ "${{ github.event.inputs.reset_db }}" = "true" ] && ARGS="$ARGS --reset-db"
           python3 ci_run.py $ARGS
         env:
