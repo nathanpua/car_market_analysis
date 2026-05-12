@@ -35,7 +35,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ${{ github.event.inputs.runner || 'self-hosted' }}
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
