@@ -1,144 +1,190 @@
-# SGCarMart Used Cars Data Scraper
+# SGCarMart Used Cars Data Pipeline
 
-## Overview
+Scrapes ~15,000 used car listings from sgcarmart.com and transforms them into a business-ready consumer vehicle table. Built with a Medallion architecture (Bronze -> Silver -> Gold) on SQLite, with incremental re-scraping, field validation, SCD Type 2 history, and CI/CD via GitHub Actions + Cloudflare R2.
 
-Scrapes ~15,000 used car listings from sgcarmart.com using static HTTP requests via Scrapling. Extracts 28 fields per listing by parsing Next.js RSC payloads. Data is stored in SQLite with incremental re-scrape support, field validation, SCD Type 2 history tracking, and daily scheduled scraping.
+## Medallion Architecture
 
-## Architecture
+```
+BRONZE (raw HTML)          SILVER (validated)              GOLD (business-ready)
++---------------+          +------------------+            +---------------------------+
+| Listing pages  |  parse   | listings         | transform  | sgcarmart_business_table   |
+| Detail pages   | ------>  | quarantine       | ---------> |   (consumer vehicles only) |
+| RSC payloads   | validate | scrape_runs      |  enrich    |   brand/model/trim         |
++---------------+          +------------------+            +-----------+---------------+
+                                                                     |
+                                                          +----------v-----------+
+                                                          | NL2SQL Chatbot       |
+                                                          | (Claude API, planned)|
+                                                          +----------------------+
+```
 
-Two-phase approach using only static HTTP (no browser required):
+### Pipeline (CI via `ci_run.py`)
 
-**Phase 1: URL Discovery** (`scrape` command)
-- Iterates listing pages (100 results/page) to extract detail page URLs
-- Parses listing IDs and detail URLs from Next.js RSC payloads
-- Stores in SQLite; incremental re-runs skip already-seen listings
-- Early termination after 3 consecutive pages with no new URLs
+```
+                         Cloudflare R2
+                    (scrapling_listings.db)
+                         |       ^
+                 download |       | upload
+                         v       |
++----------------------------------------------------------------------+
+|                      ci_run.py (orchestrator)                        |
+|                                                                      |
+|  Step 1         Step 2                 Step 3            Step 4      |
+|  download_db -> run_daily_scrape  ->  run_transform ->  upload_db    |
+|                 (Bronze -> Silver)    (Silver -> Gold)               |
++----------------------------------------------------------------------+
+```
 
-**Phase 2: Detail Scraping** (`scrape-details` command)
-- Fetches each detail page's static HTML
-- Parses all 28 fields from Next.js RSC payloads embedded in the page
-- 10 concurrent async requests with retry logic
-- Incremental — skips listings that already have complete detail data
-- Optional field validation with quarantine for invalid values
-- Optional SCD Type 2 history tracking for all changes
+Both Silver and Gold live in the **same SQLite file** — single R2 download/upload. The Gold table is rebuilt on each run, always consistent with current Silver.
 
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
 
-python scrape_listing.py scrape              # Phase 1: discover all URLs
-python scrape_listing.py scrape --pages 3    # Test with first 3 pages
+# Scrape (Bronze -> Silver)
+python scrape_listing.py scrape              # Phase 1: discover URLs
 python scrape_listing.py scrape-details      # Phase 2: scrape all detail pages
-python scrape_listing.py scrape-details --limit 100  # Test with 100 pages
-python scrape_listing.py scrape-details --no-validate # Disable validation
-python scrape_listing.py scrape-details --track-history # Enable SCD tracking
-python scrape_listing.py stats               # Show field coverage stats
-```
+python scrape_listing.py stats               # Show field coverage
 
-## Daily Automation
+# Transform (Silver -> Gold)
+python transform.py                          # Run Silver-to-Gold transform
 
-```bash
-# One-shot: run Phase 1 + Phase 2 immediately
-python scrape_listing.py run-daily
+# Daily automation (all steps)
+python scrape_listing.py run-daily           # Phase 1 + 2
 python scrape_listing.py run-daily --track-history
-
-# Daemon: runs daily at 03:00 (Asia/Singapore) via APScheduler
-python scrape_listing.py schedule
-python scrape_listing.py schedule --time 06:00 --track-history
+python scrape_listing.py schedule            # Daemon: daily at 03:00 SGT
 ```
 
-## History Tracking
+## Scraper Architecture
 
-```bash
-# View change history for a specific listing
-python scrape_listing.py history 12345
-python scrape_listing.py history 12345 --limit 50
+Two-phase approach using only static HTTP (no browser):
+
+**Phase 1: URL Discovery** — Iterates listing pages (100/page), extracts listing IDs and detail URLs from Next.js RSC payloads. Incremental: skips already-seen listings, stops after 3 empty pages.
+
+**Phase 2: Detail Scraping** — Fetches each detail page, parses 28 fields from RSC payloads. 10 concurrent async requests with retry logic. Optional field validation + quarantine. Optional SCD Type 2 history tracking.
+
+## Silver -> Gold Transform
+
+`transform.py` reads the Silver `listings` table and writes the Gold `sgcarmart_business_table`. It runs as Step 3 in `ci_run.py`, after scraping and before upload.
+
+### What the transform does
+
+1. **Filter** — Exclude commercial vehicles (vans, trucks, buses) by vehicle_type and brand
+2. **Extract** — Parse brand, model, trim from `car_name` using brand-specific regex patterns
+3. **Normalize** — Clean fuel_type (`Petrol-Electric` -> `Hybrid`), vehicle_type (`Mid-Sized Sedan` -> `Sedan`), status (`Available for sale` -> `Available`)
+4. **Parse** — Convert `coe_remaining` text to months, `reg_date` to ISO format
+5. **Compute** — Calculate `age_years`, `days_on_market`, `price_to_omv_ratio`
+6. **Score** — Percentile-based `value_score` (0-100) weighing depreciation, age, mileage, price-to-OMV, COE remaining
+7. **Lifecycle** — Detect Sold/Closed from silver, mark unseen listings as Delisted
+
+### Brand/Model Extraction
+
+Handles 90+ brands including multi-word brands (Mercedes-Benz, Land Rover, Aston Martin, Alfa Romeo, Rolls-Royce). Brand-specific regex patterns for Mercedes (-Class, EQ, AMG GT), BMW (Series, M, X, iX), Tesla, Lexus, Volvo, BYD, Porsche, and Lamborghini.
+
+```
+"Mercedes-Benz GLB-Class GLB180 Progressive"
+  -> brand: Mercedes-Benz, model: GLB-Class, trim: GLB180 Progressive
+
+"BMW X3 sDrive20i xLine"
+  -> brand: BMW, model: X3, trim: sDrive20i xLine
+
+"Volvo XC60 Recharge Plug-in Hybrid T8 Plus"
+  -> brand: Volvo, model: XC60, trim: Recharge Plug-in Hybrid T8 Plus
 ```
 
-## Data Fields (28 columns)
+### Data Profile (~15,000 Silver listings)
+
+- **Consumer vehicles**: ~13,300 after excluding 1,900 commercial (12.5%)
+- **Top brands**: Toyota (2,334), Mercedes-Benz (2,183), BMW (1,734), Honda (1,486)
+- **Vehicle types**: SUV (3,503), Luxury Sedan (2,580), Sports Car (2,305), MPV (1,519)
+- **Fuel types**: Petrol (10,713), Hybrid (1,925), Diesel (1,763), Electric (834)
+- **Price range**: $1,500 - $2,788,000, avg $128,713
+
+### Enum Mappings
+
+| Silver | Gold |
+|--------|------|
+| Petrol-Electric | Hybrid |
+| Mid-Sized Sedan | Sedan |
+| Available for sale | Available |
+| SOLD | Sold |
+| Diesel (Euro 5 Engine and Above) | Diesel |
+
+## Data Model
+
+### Silver Tables
+
+**`listings`** — 28 columns, upserted by listing_id. All scraped fields in raw form.
+
+**`listings_history`** (SCD Type 2) — All 28 columns + `history_id`, `valid_from`, `valid_to`, `is_current`, `scrape_run_id`.
+
+**`quarantine`** — Validation failures: `quarantine_id`, `listing_id`, `field_name`, `field_value`, `rule_name`, `reason`, `quarantined_at`, `resolved`.
+
+**`scrape_runs`** — Execution tracking: `id`, `started_at`, `finished_at`, `pages_fetched`, `listings_count`, `status`.
+
+### Gold Table
+
+**`sgcarmart_business_table`** — Consumer vehicles only, 35 columns:
 
 | Category | Fields |
 |----------|--------|
-| Identity | listing_id, car_name, car_model, detail_url, listing_type |
-| Financial | price, installment, depreciation, omv, arf, coe, road_tax, dereg_value |
-| Technical | engine_cap_cc, fuel_type, power, transmission, curb_weight |
-| History | reg_date, coe_remaining, mileage_km, owners, manufactured, posted_date |
-| Metadata | status, vehicle_type, features, accessories |
+| Identity | listing_id, brand, model, trim, car_name, detail_url |
+| Pricing | price, installment, depreciation, dereg_value, price_to_omv_ratio, value_score |
+| Specs | manufactured, age_years, mileage_km, engine_cap_cc, transmission, fuel_type, power, curb_weight |
+| Registration | reg_date, coe, coe_remaining_months, road_tax, omv, arf |
+| Classification | vehicle_type (clean enum), listing_type, owners |
+| Metadata | days_on_market, features, accessories |
+| Lifecycle | status (Available/Sold/Closed/Reserved/Delisted), first_seen_at, last_seen_at |
+
+Indexed on brand, model, price, fuel_type, vehicle_type, status, depreciation, value_score.
 
 ## Project Structure
 
 | File | Purpose |
 |------|---------|
-| `scrape_listing.py` | Main scraper CLI (both phases + scheduling commands) |
-| `db.py` | SQLite database module (schema, upsert, queries, quarantine) |
-| `validators.py` | Field validation rules with quarantine support |
-| `db_scd.py` | SCD Type 2 history tracking (change detection, history writes) |
-| `scheduler.py` | APScheduler daily cron + run-daily logic |
-| `requirements.txt` | Python dependencies |
-| `output/scrapling_listings.db` | SQLite database with all listing data |
-| `tests/` | Unit and integration tests |
+| `scrape_listing.py` | Main scraper CLI (Bronze -> Silver) |
+| `transform.py` | Silver-to-Gold transformation |
+| `ci_run.py` | CI orchestrator (download, scrape, transform, upload) |
+| `db.py` | SQLite database module (Silver schema, upsert, queries, quarantine) |
+| `db_scd.py` | SCD Type 2 history tracking |
+| `validators.py` | Field validation rules |
+| `scheduler.py` | APScheduler daily cron |
+| `storage.py` | Cloudflare R2 upload/download |
+| `plans/` | Implementation plans |
+| `tests/` | Unit and integration tests (204 tests) |
 
 ## Key Technical Decisions
 
-### 1. Static HTTP over Browser Rendering
+### Static HTTP over Browser Rendering
 
-Scrapling's `AsyncFetcher` (curl_cffi backend) fetches pages as static HTTP. No browser overhead. The site serves all data in Next.js RSC payloads embedded in the HTML, making browser rendering unnecessary.
+Scrapling's `AsyncFetcher` (curl_cffi backend) fetches pages as static HTTP. SGCarMart serves all data in Next.js RSC payloads, making browser rendering unnecessary.
 
-### 2. RSC Payload Parsing
+### RSC Payload Parsing
 
-SGCarMart is a Next.js app that embeds all listing data in React Server Component payloads within the HTML. The scraper extracts these payloads and parses field values using regex with next-field lookahead to handle multi-level JSON escaping (e.g., `19"` rims in accessories).
+Next.js RSC payloads embed listing data in `<script>` tags. The scraper uses regex with next-field lookahead to handle multi-level JSON escaping. Some fields (like `type_of_vehicle`) are RSC references (e.g., `$15f` pointing to a chunk like `15f:{"text":"SUV","link":"..."}`) — these are resolved by looking up the referenced chunk and extracting the `text` value.
 
-### 3. SQLite Storage
+### SQLite Storage
 
-SQLite provides ACID transactions, efficient upsert by listing_id, and query capability without loading the full dataset. The COALESCE-based upsert preserves existing non-null values during re-scrapes.
+SQLite provides ACID transactions, efficient upsert by listing_id, and query capability. Both Silver and Gold tables live in one file. COALESCE-based upsert preserves existing non-null values during re-scrapes.
 
-### 4. Incremental Re-scraping
+### Incremental Re-scraping
 
-Both phases are incremental:
-- Phase 1 tracks seen listing IDs and skips pages with no new listings
-- Phase 2 skips listings that already have complete detail data (non-null price and accessories)
-- Failed requests are retried up to 3 times
+Both scraper phases are incremental: Phase 1 skips seen listing IDs, Phase 2 skips listings with complete detail data. Failed requests retry up to 3 times.
 
-### 5. Field Validation
+### Field Validation
 
-Each of the 28 fields is validated before writing to the database:
-- **Range checks**: price (1–20M), mileage (0–1M km), engine_cap (1–10K cc), etc.
-- **Enum checks**: transmission (Auto/Manual), fuel_type, listing_type, status
-- **Regex checks**: reg_date format, coe_remaining format, detail_url prefix
-- **Pass-through**: features, accessories (text blobs)
-- **Design**: NULL = valid (missing data is not a failure); only present-but-wrong values fail
-- Invalid fields are set to None in the record; failures are stored in the `quarantine` table with reason, rule name, and raw value for review
-- `--no-validate` flag disables validation when needed
+28 fields validated before database write: range checks (price, mileage, engine_cap), enum checks (transmission, fuel_type), regex checks (reg_date, coe_remaining), and pass-through (features, accessories). Invalid fields set to None, failures logged to `quarantine` table.
 
-### 6. SCD Type 2 History Tracking
+### SCD Type 2 History
 
-All listing changes are tracked over time using `listings_history` table:
-- `valid_from` / `valid_to` / `is_current` columns for each version
-- Change detection: NULL-aware comparison with epsilon for float fields (power)
-- NULL incoming = no change (COALESCE logic: existing data preserved)
-- New listings get an initial history row; changed listings close old row + insert new
-- Use `--track-history` flag to enable
+All listing changes tracked over time with `valid_from`/`valid_to`/`is_current` columns. NULL-aware comparison with epsilon for floats. Enabled with `--track-history`.
 
-### 7. APScheduler over Cron
+### Gold Table Rebuild
 
-Pure Python, cross-platform, cron syntax, timezone-aware (Asia/Singapore), no external daemon required. `max_instances=1` prevents concurrent runs.
-
-## Data Model
-
-### `listings` (current state)
-All 28 columns, upserted by listing_id.
-
-### `listings_history` (SCD Type 2)
-All 28 columns + `history_id` (PK), `valid_from`, `valid_to`, `is_current`, `scrape_run_id`. Indexed on `(listing_id, is_current)` and `(listing_id, valid_from)`.
-
-### `quarantine` (validation failures)
-`quarantine_id`, `listing_id`, `field_name`, `field_value`, `rule_name`, `reason`, `raw_record`, `quarantined_at`, `scrape_run_id`, `resolved`.
-
-### `scrape_runs` (execution tracking)
-`id`, `started_at`, `finished_at`, `pages_fetched`, `listings_count`, `status`.
+The Gold table is rebuilt on each transform run (not incremental). Lifecycle state (Sold, Delisted) is preserved by comparing against the previous Gold table before rebuild. This keeps Gold always consistent with Silver.
 
 ## Prerequisites
 
 - Python 3.11+
-- No API keys or paid services required
+- No API keys required for scraping
