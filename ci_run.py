@@ -1,6 +1,6 @@
 """CI entry point for GitHub Actions workflow.
 
-Orchestrates: download DB from R2, run daily scrape, upload DB back to R2.
+Orchestrates: download DB from R2, run daily scrape, run Silver->Gold transform, upload DB back to R2.
 Designed to be called from .github/workflows/scrape.yml.
 
 Usage:
@@ -105,7 +105,24 @@ def main():
         logging.error("Daily scrape failed: %s", e)
         scrape_failed = True
 
-    # Step 3: Upload DB to R2 (always, even on scrape failure)
+    # Step 3: Run Silver -> Gold transform
+    transform_failed = False
+    print("\n" + "=" * 40)
+    print("  TRANSFORM: Silver -> Gold")
+    print("=" * 40)
+    try:
+        from transform import run_transform
+        result = run_transform()
+        print(f"  Silver: {result['total_silver']} listings")
+        print(f"  Commercial excluded: {result['excluded_commercial']}")
+        print(f"  Gold: {result['gold_rows']} consumer vehicles")
+        print(f"    Available: {result['available']}")
+        print(f"    Sold: {result['sold']}")
+    except Exception as e:
+        logging.error("Gold transform failed: %s", e, exc_info=True)
+        transform_failed = True
+
+    # Step 4: Upload DB to R2 (always, even on scrape failure)
     if not args.dry_run:
         print("\n" + "=" * 40)
         print("  STORAGE: Upload DB to R2")
@@ -116,9 +133,14 @@ def main():
     else:
         print("  [DRY RUN] Skipping R2 upload\n")
 
-    # Exit with non-zero if scrape failed (so GitHub Actions marks it as failed)
-    if scrape_failed:
-        print("  STATUS: FAILED (DB uploaded with partial progress)")
+    # Exit with non-zero if scrape or transform failed
+    if scrape_failed or transform_failed:
+        reasons = []
+        if scrape_failed:
+            reasons.append("scrape")
+        if transform_failed:
+            reasons.append("transform")
+        print(f"  STATUS: FAILED ({', '.join(reasons)}) — DB uploaded with partial progress")
         sys.exit(1)
     else:
         print("  STATUS: SUCCESS")

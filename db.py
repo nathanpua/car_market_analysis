@@ -251,15 +251,42 @@ class ListingDB:
         """Return (listing_id, detail_url) for fully-scraped active listings.
 
         Used by SCD to re-fetch listings for price/depreciation change detection.
-        Excludes SOLD/CLOSED listings.
+        Excludes SOLD/CLOSED/Delisted listings.
         """
         return self.conn.execute(
             "SELECT listing_id, detail_url FROM listings "
             "WHERE detail_url IS NOT NULL "
             "AND price IS NOT NULL AND accessories IS NOT NULL "
-            "AND (status IS NULL OR status NOT IN ('SOLD', 'Sold', 'CLOSED', 'Closed')) "
+            "AND (status IS NULL OR status NOT IN ('SOLD', 'Sold', 'CLOSED', 'Closed', 'Delisted')) "
             "ORDER BY listing_id"
         ).fetchall()
+
+    def mark_expired_listings(self, active_ids: set[int]) -> int:
+        """Mark listings not in active_ids as 'Delisted'.
+
+        Only affects currently active listings (Available/Reserved status).
+        Preserves Sold/Closed/Delisted status for historical records.
+
+        Args:
+            active_ids: Set of listing_ids found in current scrape
+
+        Returns:
+            Number of listings marked as Delisted
+        """
+        if not active_ids:
+            return 0
+
+        placeholders = ",".join(["?"] * len(active_ids))
+        sql = f"""
+            UPDATE listings
+            SET status = 'Delisted'
+            WHERE listing_id NOT IN ({placeholders})
+            AND status != 'Delisted'
+            AND (status IS NULL OR status IN ('Available', 'Available for sale', 'Reserved'))
+        """
+        cursor = self.conn.execute(sql, list(active_ids))
+        self.conn.commit()
+        return cursor.rowcount
 
     def close(self):
         self.conn.close()

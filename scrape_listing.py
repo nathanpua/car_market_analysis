@@ -275,9 +275,19 @@ def parse_detail_html(html: str) -> dict:
         if val is not None:
             raw[field] = val
 
-    # type_of_vehicle: nested object {\"text\":\"SUV\",...}
+    # type_of_vehicle: may be an RSC reference (e.g. "$15f") pointing to
+    # a chunk like 15f:{\"text\":\"SUV\",\"link\":\"...\"} elsewhere in the payload.
     tov = _extract_rsc_field(data_line, 'type_of_vehicle')
     if tov:
+        if tov.startswith('$'):
+            ref_id = tov[1:]
+            ref_match = re.search(rf'{re.escape(ref_id)}:\{{', full_rsc)
+            if ref_match:
+                # ref_match.end() is after the '{' — back up 1 to include it
+                ref_data = full_rsc[ref_match.end() - 1:]
+                text_val = _extract_rsc_field(ref_data, 'text')
+                if text_val:
+                    tov = text_val
         raw['type_of_vehicle'] = tov
 
     # car_model from title tag (fallback)
@@ -453,6 +463,7 @@ async def _run_scrape(max_pages: int | None, start_page: int = 1):
 
         try:
             page_nums = list(range(start_page, start_page + effective_max))
+            run_seen_ids: set[int] = set()
             with tqdm(page_nums, unit="page") as pbar:
                 for page_num in pbar:
                     _pg, listings = await _fetch_listing_page(page_num)
@@ -476,7 +487,12 @@ async def _run_scrape(max_pages: int | None, start_page: int = 1):
                             break
                         continue
 
-                    # Add only new listings
+                    # Track ALL listing IDs seen in this run (for expired detection)
+                    for car in listings:
+                        if car.get('listing_id'):
+                            run_seen_ids.add(car['listing_id'])
+
+                    # Add only new listings to batch
                     batch = [
                         car for car in listings
                         if car.get('listing_id') and car['listing_id'] not in seen_ids
@@ -506,6 +522,12 @@ async def _run_scrape(max_pages: int | None, start_page: int = 1):
             if failed:
                 db.finish_run(run_id, pages_fetched, new_count, status="failed")
             else:
+                # Mark listings not seen in this run as Delisted
+                if run_seen_ids:
+                    expired_count = db.mark_expired_listings(run_seen_ids)
+                    if expired_count:
+                        print(f"Marked {expired_count} listings as Delisted")
+
                 total = db.get_count()
                 db.finish_run(run_id, pages_fetched, total)
 
