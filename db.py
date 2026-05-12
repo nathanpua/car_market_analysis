@@ -244,7 +244,7 @@ class ListingDB:
             "ORDER BY listing_id"
         )
         if limit:
-            sql += f" LIMIT {int(limit)}"
+            return self.conn.execute(sql + " LIMIT ?", (int(limit),)).fetchall()
         return self.conn.execute(sql).fetchall()
 
     def get_active_listings_for_rescrape(self) -> list[tuple[int, str]]:

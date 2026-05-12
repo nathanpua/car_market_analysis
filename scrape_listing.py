@@ -498,7 +498,8 @@ async def _run_scrape(max_pages: int | None, start_page: int = 1):
                     if pages_fetched > 0 and pages_fetched % CHECKPOINT_EVERY_N == 0:
                         pbar.write(f"  >> Checkpoint: {total} URLs discovered")
 
-        except BaseException:
+        except BaseException as e:
+            logger.error("Phase 1 aborted: %s", e)
             failed = True
             raise
         finally:
@@ -646,7 +647,8 @@ async def _run_scrape_details(limit: int | None = None, validate: bool = True,
                             f"{remaining} remaining"
                         )
 
-        except BaseException:
+        except BaseException as e:
+            logger.error("Phase 2 aborted: %s", e)
             raise
         finally:
             elapsed = (datetime.now() - start_time).total_seconds()

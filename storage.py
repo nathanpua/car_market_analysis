@@ -6,6 +6,7 @@ Uses boto3 with the S3-compatible R2 API.
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import boto3
@@ -18,11 +19,17 @@ DB_PATH = DB_DIR / "scrapling_listings.db"
 R2_DB_KEY = os.environ.get("R2_DB_KEY", "scrapling_listings.db")
 
 _UPLOAD_RETRIES = 3
-_UPLOAD_RETRY_DELAY = 2  # seconds
+_RETRY_DELAY = 2  # seconds base, multiplied by attempt number
+
+_REQUIRED_ENV_VARS = ("R2_ENDPOINT", "R2_ACCESS_KEY", "R2_SECRET_KEY", "R2_BUCKET")
 
 
 def _get_s3_client():
     """Create an S3 client configured for Cloudflare R2."""
+    missing = [v for v in _REQUIRED_ENV_VARS if not os.environ.get(v)]
+    if missing:
+        raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+
     endpoint = os.environ["R2_ENDPOINT"]
     access_key = os.environ["R2_ACCESS_KEY"]
     secret_key = os.environ["R2_SECRET_KEY"]
@@ -49,6 +56,8 @@ def download_db() -> Path:
     If the object does not exist in R2 (first run), creates the output
     directory and returns the path anyway -- ListingDB.__init__ will
     create the DB file fresh.
+
+    Retries up to 3 times on transient failures.
     """
     DB_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -61,12 +70,22 @@ def download_db() -> Path:
         logger.info("No existing DB in R2 (first run), will create fresh")
         return DB_PATH
 
-    logger.info("Downloading DB from R2: %s/%s", bucket, R2_DB_KEY)
-    client.download_file(bucket, R2_DB_KEY, str(DB_PATH))
+    for attempt in range(1, _UPLOAD_RETRIES + 1):
+        try:
+            logger.info(
+                "Downloading DB from R2: %s/%s (attempt %d)",
+                bucket, R2_DB_KEY, attempt,
+            )
+            client.download_file(bucket, R2_DB_KEY, str(DB_PATH))
+            size_mb = DB_PATH.stat().st_size / (1024 * 1024)
+            logger.info("Downloaded DB (%.1f MB)", size_mb)
+            return DB_PATH
+        except Exception as e:
+            logger.warning("Download failed (attempt %d): %s", attempt, e)
+            if attempt < _UPLOAD_RETRIES:
+                time.sleep(_RETRY_DELAY * attempt)
 
-    size_mb = DB_PATH.stat().st_size / (1024 * 1024)
-    logger.info("Downloaded DB (%.1f MB)", size_mb)
-    return DB_PATH
+    raise RuntimeError(f"Download failed after {_UPLOAD_RETRIES} attempts")
 
 
 def upload_db() -> None:
@@ -94,8 +113,7 @@ def upload_db() -> None:
         except Exception as e:
             logger.warning("Upload failed (attempt %d): %s", attempt, e)
             if attempt < _UPLOAD_RETRIES:
-                import time
-                time.sleep(_UPLOAD_RETRY_DELAY * attempt)
+                time.sleep(_RETRY_DELAY * attempt)
 
     logger.error("Upload failed after %d attempts", _UPLOAD_RETRIES)
     raise RuntimeError(f"Upload failed after {_UPLOAD_RETRIES} attempts")

@@ -19,6 +19,14 @@ on:
         options:
           - ""
           - "true"
+      runner:
+        description: "Runner to use"
+        required: false
+        default: "self-hosted"
+        type: choice
+        options:
+          - "self-hosted"
+          - "ubuntu-latest"
 
 concurrency:
   group: daily-scrape
@@ -26,7 +34,7 @@ concurrency:
 
 jobs:
   scrape:
-    runs-on: self-hosted
+    runs-on: ${{ github.event.inputs.runner || 'self-hosted' }}
     timeout-minutes: 120
 
     steps:
@@ -38,8 +46,8 @@ jobs:
       - name: Run daily scrape
         run: |
           ARGS=""
-          [ -n "${{ github.event.inputs.max_pages }}" ] && ARGS="$ARGS --max-pages ${{ github.event.inputs.max_pages }}"
-          [ -n "${{ github.event.inputs.detail_limit }}" ] && ARGS="$ARGS --detail-limit ${{ github.event.inputs.detail_limit }}"
+          [ -n "${{ github.event.inputs.max_pages }}" ] && ARGS="$ARGS --max-pages '${{ github.event.inputs.max_pages }}'"
+          [ -n "${{ github.event.inputs.detail_limit }}" ] && ARGS="$ARGS --detail-limit '${{ github.event.inputs.detail_limit }}'"
           [ "${{ github.event.inputs.reset_db }}" = "true" ] && ARGS="$ARGS --reset-db"
           python3 ci_run.py $ARGS
         env:
@@ -48,6 +56,7 @@ jobs:
           R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
           R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
 
       - name: Upload output artifacts
         if: always()
