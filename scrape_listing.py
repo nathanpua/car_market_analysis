@@ -54,7 +54,17 @@ OUTPUT_DIR = Path("output")
 DB_PATH = OUTPUT_DIR / "scrapling_listings.db"
 
 # Proxy support (optional, set SCRAPER_PROXY env var)
-PROXY_URL = os.environ.get("SCRAPER_PROXY") or None
+# Format: http://username:password@host:port
+_raw_proxy = os.environ.get("SCRAPER_PROXY", "").strip()
+PROXY_URL = _raw_proxy or None
+if PROXY_URL:
+    from urllib.parse import urlparse
+    _parsed = urlparse(PROXY_URL)
+    if not _parsed.scheme or not _parsed.hostname:
+        logger.warning("SCRAPER_PROXY format invalid, expected http://user:pass@host:port")
+        PROXY_URL = None
+    else:
+        logger.info("Proxy configured: %s://%s:%d", _parsed.scheme, _parsed.hostname, _parsed.port or 0)
 
 
 # ============================================================

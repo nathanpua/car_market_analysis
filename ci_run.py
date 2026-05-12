@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime
 
@@ -36,6 +37,31 @@ def main():
     print(f"  Dry run:     {args.dry_run}")
     print(f"  Max pages:   {args.max_pages or 'all'}")
     print(f"  Detail limit: {args.detail_limit or 'all'}\n")
+
+    # Proxy connectivity test
+    proxy_url = os.environ.get("SCRAPER_PROXY", "").strip()
+    if proxy_url:
+        print("=" * 40)
+        print("  PROXY: Testing connectivity")
+        print("=" * 40)
+        from urllib.parse import urlparse
+        parsed = urlparse(proxy_url)
+        print(f"  Host: {parsed.hostname}:{parsed.port}")
+        try:
+            from scrapling.fetchers import AsyncFetcher
+            import asyncio
+            async def _test():
+                return await AsyncFetcher.get("https://httpbin.org/ip", proxy=proxy_url, timeout=10000)
+            page = asyncio.run(_test())
+            if page.status == 200:
+                print(f"  Proxy OK: {page.text_content.strip()}")
+            else:
+                print(f"  Proxy returned status {page.status}")
+        except Exception as e:
+            print(f"  Proxy test failed: {e}")
+        print()
+    else:
+        print("  Proxy: not configured (direct connection)\n")
 
     scrape_failed = False
 
